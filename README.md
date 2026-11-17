@@ -35,6 +35,7 @@ All analysis was carried out in R 4.6.2 using an R Markdown notebook (`code/anal
 **Exploratory analysis.** I compared per-sample distributions with boxplots, performed principal component analysis (PCA) on scaled data, and carried out hierarchical clustering (Euclidean distance, Ward's method) without using class labels, to see whether the two leukaemia types separate naturally.
 
 **Differential expression.** I used `limma` (Ritchie et al., 2015), which fits a linear model per gene and applies empirical Bayes moderation of variances. This is well suited to small sample sizes. P-values were adjusted with the Benjamini-Hochberg method. Genes with adjusted P < 0.05 and |log2 fold change| > 1 were considered significant. The comparison is AML minus ALL, so positive fold changes mean higher expression in AML.
+Probe sets were mapped to gene symbols using the Bioconductor annotation package hu6800.db (v3.13.0), matching the Affymetrix Hu6800 platform.
 
 **Classification.** To prevent information leaking from the test set, gene ranking was repeated using the 38 training samples only, and the top 50 genes were selected. A linear SVM (`caret` with the `e1071` backend; Kuhn, 2008) was trained on centred and scaled expression, with the cost parameter tuned over 0.01, 0.1, 1 and 10 using 5-fold cross-validation repeated 5 times. The final model was evaluated once on the 34 independent test samples using a confusion matrix, accuracy, sensitivity, specificity and Cohen's kappa.
 
@@ -80,18 +81,18 @@ Limma identified **276 genes** with adjusted P < 0.05 and |log2 fold change| > 1
 
 **Table 1.** Top 10 differentially expressed probe sets (log2FC = AML minus ALL).
 
-| Probe set | Gene symbol | log2FC | Adj. P | Higher in |
-|---|---|---|---|---|
-| M84526_at | CFD | 4.73 | 5.6e-21 | AML |
-| M27891_at | CST3 | 4.81 | 7.7e-20 | AML |
-| U46499_at | MGST1 | 3.19 | 4.5e-19 | AML |
-| M23197_at | CD33 | 2.17 | 2.2e-17 | AML |
-| X95735_at | ZYX | 3.29 | 1.2e-15 | AML |
-| D88422_at | CSTA | 3.32 | 1.9e-15 | AML |
-| M31523_at | TCF3 | -2.07 | 8.9e-15 | ALL |
-| M11722_at | DNTT | -3.78 | 4.7e-14 | ALL |
-| L09209_s_at | APLP2 | 2.57 | 1.2e-12 | AML |
-| J05243_at | SPTAN1 | -1.99 | 4.4e-12 | ALL |
+| Probe set | Gene symbol | Gene name | log2FC | Adj. P | Higher in |
+|---|---|---|---|---|---|
+| M84526_at | CFD | complement factor D | 4.73 | 5.6e-21 | AML |
+| M27891_at | CST3 | cystatin C | 4.81 | 7.7e-20 | AML |
+| U46499_at | MGST1 | microsomal glutathione S-transferase 1 | 3.19 | 4.5e-19 | AML |
+| M23197_at | CD33 | CD33 molecule | 2.17 | 2.2e-17 | AML |
+| X95735_at | ZYX | zyxin | 3.29 | 1.2e-15 | AML |
+| D88422_at | CSTA | cystatin A | 3.32 | 1.9e-15 | AML |
+| M31523_at | TCF3 | transcription factor 3 | -2.07 | 8.9e-15 | ALL |
+| M11722_at | DNTT | DNA nucleotidylexotransferase | -3.78 | 4.7e-14 | ALL |
+| L09209_s_at | APLP2 | amyloid beta precursor like protein 2 | 2.57 | 1.2e-12 | AML |
+| J05243_at | SPTAN1 | spectrin alpha, non-erythrocytic 1 | -1.99 | 4.4e-12 | ALL |
 
 ### 5.4 Classification
 
@@ -147,6 +148,7 @@ AML and ALL can be distinguished using a compact set of genes. A linear SVM trai
 install.packages("BiocManager")
 BiocManager::install(c("golubEsets", "Biobase", "limma"))
 install.packages(c("tidyverse", "caret", "e1071", "pheatmap", "kernlab", "rmarkdown"))
+BiocManager::install("hu6800.db")
 
 # 2. Render the analysis from the repository root
 rmarkdown::render("code/analysis.Rmd")
