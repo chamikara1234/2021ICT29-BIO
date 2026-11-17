@@ -1,0 +1,306 @@
+---
+title: "Classifying AML vs ALL Leukaemia from Gene Expression (Golub et al. 1999)"
+author: "H.A.K Chamikara Madushanka"
+date: "`r format(Sys.Date(), '%d %B %Y')`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    code_folding: show
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE,
+                      fig.width = 7, fig.height = 5)
+set.seed(2026)   # reproducibility for CV and any random steps
+# This file lives in code/, so figures and results go one level up
+dir.create("../figures", showWarnings = FALSE)
+dir.create("../results", showWarnings = FALSE)
+```
+
+# 0. Setup
+
+Run this block once (it is not evaluated when knitting).
+
+```{r install, eval=FALSE}
+if (!requireNamespace("BiocManager", quietly = TRUE)) install.packages("BiocManager")
+BiocManager::install(c("golubEsets", "Biobase", "limma"))
+install.packages(c("tidyverse", "caret", "e1071", "pheatmap"))
+```
+
+```{r libs}
+library(golubEsets)   # Golub leukaemia data
+library(Biobase)      # ExpressionSet accessors
+library(limma)        # differential expression
+library(caret)        # model training / evaluation
+library(e1071)        # SVM backend
+library(pheatmap)     # heatmaps
+library(tidyverse)    # data wrangling + ggplot2
+```
+
+# 1. Data import
+
+Golub_Train (38 samples) and Golub_Test (34 samples) are the original
+training/independent test split from the paper. Golub_Merge holds all 72.
+
+```{r import}
+data(Golub_Merge)
+eset  <- Golub_Merge
+expr  <- exprs(eset)        # genes x samples (Affymetrix intensities)
+pheno <- pData(eset)
+
+cat("Genes (probe sets):", nrow(expr), "\nSamples:", ncol(expr), "\n")
+head(pheno[, c("ALL.AML", "T.B.cell", "Gender", "Source")], 5)
+
+# Class label: ALL = acute lymphoblastic leukaemia, AML = acute myeloid
+class <- factor(pheno$ALL.AML, levels = c("ALL", "AML"))
+table(class)
+```
+
+```{r split}
+# Original split: first 38 samples are the training set, remaining 34 the test set
+n_train   <- ncol(exprs(Golub_Train))
+train_idx <- seq_len(n_train)
+test_idx  <- setdiff(seq_len(ncol(expr)), train_idx)
+
+# Sanity check against the published split (27 ALL/11 AML train; 20 ALL/14 AML test)
+print(table(class[train_idx])); print(table(class[test_idx]))
+```
+
+# 2. Quality control and preprocessing
+
+```{r qc}
+cat("Missing values:", sum(is.na(expr)), "\n")
+summary(as.vector(expr))
+
+# Raw intensities are heavily skewed and include negatives -> motivates preprocessing
+qc_raw <- data.frame(value = as.vector(expr))
+p_raw <- ggplot(qc_raw, aes(value)) +
+  geom_histogram(bins = 80, fill = "steelblue") +
+  labs(title = "Raw intensity distribution", x = "Intensity", y = "Count") +
+  theme_minimal()
+p_raw
+ggsave("../figures/raw_intensity_hist.png", p_raw, width = 7, height = 5, dpi = 150)
+```
+
+Preprocessing follows the standard Golub/Dudoit pipeline:
+1. Floor at 100 and ceiling at 16,000 (values outside are unreliable).
+2. Keep genes with max/min > 5 and max - min > 500 (removes uninformative genes).
+3. log2 transform to stabilise variance.
+
+```{r preprocess}
+expr_p <- expr
+expr_p[expr_p < 100]   <- 100
+expr_p[expr_p > 16000] <- 16000
+
+mx <- apply(expr_p, 1, max)
+mn <- apply(expr_p, 1, min)
+keep <- (mx / mn > 5) & (mx - mn > 500)
+cat("Genes kept after filtering:", sum(keep), "of", length(keep), "\n")
+
+expr_f <- log2(expr_p[keep, ])
+
+# Gene annotation (fall back to probe IDs if the featureData is empty)
+fd <- tryCatch(fData(eset)[keep, , drop = FALSE], error = function(e) NULL)
+desc_col <- if (!is.null(fd)) grep("Description", colnames(fd), value = TRUE)[1] else NA
+gene_desc <- if (!is.na(desc_col)) as.character(fd[[desc_col]]) else rownames(expr_f)
+names(gene_desc) <- rownames(expr_f)
+
+p_clean <- ggplot(data.frame(value = as.vector(expr_f)), aes(value)) +
+  geom_histogram(bins = 80, fill = "darkorange") +
+  labs(title = "After preprocessing (log2)", x = "log2 intensity", y = "Count") +
+  theme_minimal()
+p_clean
+ggsave("../figures/clean_intensity_hist.png", p_clean, width = 7, height = 5, dpi = 150)
+```
+
+# 3. Exploratory data analysis
+
+## 3.1 Sample distributions
+
+```{r boxplot}
+long <- as.data.frame(t(expr_f)) |>
+  mutate(sample = colnames(expr_f), class = class) |>
+  pivot_longer(-c(sample, class), names_to = "gene", values_to = "log2expr")
+
+p_box <- ggplot(long, aes(x = reorder(sample, log2expr, median), y = log2expr, fill = class)) +
+  geom_boxplot(outlier.size = 0.3) +
+  labs(title = "Expression distribution per sample", x = "Sample", y = "log2 expression") +
+  theme_minimal() + theme(axis.text.x = element_blank())
+p_box
+ggsave("../figures/sample_boxplot.png", p_box, width = 9, height = 5, dpi = 150)
+```
+
+## 3.2 PCA
+
+```{r pca}
+pca <- prcomp(t(expr_f), scale. = TRUE)
+var_exp <- round(100 * summary(pca)$importance[2, 1:2], 1)
+
+pca_df <- data.frame(PC1 = pca$x[, 1], PC2 = pca$x[, 2], class = class)
+p_pca <- ggplot(pca_df, aes(PC1, PC2, colour = class)) +
+  geom_point(size = 3, alpha = 0.85) +
+  stat_ellipse(level = 0.9) +
+  labs(title = "PCA of preprocessed expression",
+       x = paste0("PC1 (", var_exp[1], "%)"), y = paste0("PC2 (", var_exp[2], "%)")) +
+  theme_minimal()
+p_pca
+ggsave("../figures/pca.png", p_pca, width = 7, height = 5, dpi = 150)
+```
+
+## 3.3 Hierarchical clustering
+
+```{r hclust}
+d  <- dist(t(expr_f))
+hc <- hclust(d, method = "ward.D2")
+png("../figures/dendrogram.png", width = 1200, height = 600, res = 120)
+plot(hc, labels = as.character(class), cex = 0.6,
+     main = "Hierarchical clustering of samples (Ward, Euclidean)")
+dev.off()
+plot(hc, labels = as.character(class), cex = 0.6,
+     main = "Hierarchical clustering of samples (Ward, Euclidean)")
+
+# How well does a 2-cluster cut recover the true classes?
+table(cluster = cutree(hc, 2), class = class)
+```
+
+# 4. Differential expression (limma)
+
+To avoid information leakage into the classifier later, differential
+expression for *feature selection* uses the **training set only**. A second
+analysis on all 72 samples is used for biological interpretation.
+
+```{r limma-all}
+design_all <- model.matrix(~ class)
+fit_all <- eBayes(lmFit(expr_f, design_all))
+tt_all <- topTable(fit_all, coef = "classAML", number = Inf, adjust.method = "BH") |>
+  rownames_to_column("probe") |>
+  mutate(description = gene_desc[probe])
+
+cat("Significant genes (adj.P < 0.05, |logFC| > 1):",
+    sum(tt_all$adj.P.Val < 0.05 & abs(tt_all$logFC) > 1), "\n")
+head(tt_all[, c("probe", "description", "logFC", "adj.P.Val")], 15)
+write_csv(tt_all, "../results/limma_AML_vs_ALL_all_samples.csv")
+```
+
+```{r volcano}
+tt_all <- tt_all |>
+  mutate(status = case_when(adj.P.Val < 0.05 & logFC >  1 ~ "Up in AML",
+                            adj.P.Val < 0.05 & logFC < -1 ~ "Up in ALL",
+                            TRUE ~ "Not significant"))
+p_vol <- ggplot(tt_all, aes(logFC, -log10(adj.P.Val), colour = status)) +
+  geom_point(alpha = 0.6, size = 1) +
+  scale_colour_manual(values = c("Up in AML" = "firebrick", "Up in ALL" = "royalblue",
+                                 "Not significant" = "grey70")) +
+  geom_vline(xintercept = c(-1, 1), linetype = "dashed") +
+  geom_hline(yintercept = -log10(0.05), linetype = "dashed") +
+  labs(title = "Volcano plot: AML vs ALL", x = "log2 fold change (AML - ALL)",
+       y = "-log10 adjusted P") +
+  theme_minimal()
+p_vol
+ggsave("../figures/volcano.png", p_vol, width = 7, height = 5, dpi = 150)
+```
+
+```{r heatmap}
+top50 <- tt_all$probe[1:50]
+ann <- data.frame(class = class, row.names = colnames(expr_f))
+pheatmap(expr_f[top50, ], scale = "row", annotation_col = ann,
+         show_rownames = FALSE, show_colnames = FALSE,
+         main = "Top 50 differentially expressed genes",
+         filename = "../figures/heatmap_top50.png", width = 8, height = 7)
+pheatmap(expr_f[top50, ], scale = "row", annotation_col = ann,
+         show_rownames = FALSE, show_colnames = FALSE,
+         main = "Top 50 differentially expressed genes")
+```
+
+# 5. Predictive model: SVM
+
+Pipeline (no leakage): limma on the training samples only, select the top *k*
+genes, train a linear SVM with repeated 5-fold cross-validation, then evaluate
+once on the independent test set.
+
+```{r svm-train}
+x_train <- expr_f[, train_idx]; y_train <- class[train_idx]
+x_test  <- expr_f[, test_idx];  y_test  <- class[test_idx]
+
+# Feature selection on training data only
+fit_tr <- eBayes(lmFit(x_train, model.matrix(~ y_train)))
+rank_tr <- topTable(fit_tr, coef = 2, number = Inf, sort.by = "P")
+top_genes <- function(k) rownames(rank_tr)[1:k]
+
+ctrl <- trainControl(method = "repeatedcv", number = 5, repeats = 5,
+                     classProbs = TRUE, summaryFunction = twoClassSummary)
+
+fit_svm <- function(k) {
+  g <- top_genes(k)
+  train(x = t(x_train[g, ]), y = y_train, method = "svmLinear2",
+        trControl = ctrl, metric = "ROC",
+        preProcess = c("center", "scale"),
+        tuneGrid = data.frame(cost = c(0.01, 0.1, 1, 10)))
+}
+
+model <- fit_svm(50)
+model
+```
+
+```{r svm-test}
+g50 <- top_genes(50)
+pred <- predict(model, t(x_test[g50, ]))
+cm <- confusionMatrix(pred, y_test, positive = "AML")
+cm
+```
+
+```{r cm-plot}
+cm_df <- as.data.frame(cm$table)
+p_cm <- ggplot(cm_df, aes(Reference, Prediction, fill = Freq)) +
+  geom_tile() + geom_text(aes(label = Freq), size = 8) +
+  scale_fill_gradient(low = "white", high = "steelblue") +
+  labs(title = "Confusion matrix on independent test set (50 genes)") +
+  theme_minimal()
+p_cm
+ggsave("../figures/confusion_matrix.png", p_cm, width = 6, height = 5, dpi = 150)
+```
+
+## 5.1 Sensitivity to number of genes
+
+```{r k-sweep}
+ks <- c(2, 5, 10, 25, 50, 100, 250)
+sweep <- map_dfr(ks, function(k) {
+  m <- fit_svm(k)
+  p <- predict(m, t(x_test[top_genes(k), ]))
+  tibble(k = k,
+         cv_auc = max(m$results$ROC),
+         test_acc = mean(p == y_test))
+})
+sweep
+
+p_k <- sweep |>
+  pivot_longer(-k, names_to = "metric", values_to = "value") |>
+  ggplot(aes(k, value, colour = metric)) +
+  geom_line() + geom_point() + scale_x_log10() +
+  labs(title = "Performance vs number of selected genes",
+       x = "Number of genes (log scale)", y = "Value") +
+  theme_minimal()
+p_k
+ggsave("../figures/k_sweep.png", p_k, width = 7, height = 5, dpi = 150)
+write_csv(sweep, "../results/svm_k_sweep.csv")
+```
+
+# 6. Top marker genes for interpretation
+
+```{r markers}
+markers <- tt_all |>
+  slice_head(n = 10) |>
+  select(probe, description, logFC, adj.P.Val)
+markers
+write_csv(markers, "../results/top10_markers.csv")
+```
+
+Look up each gene in GeneCards/UniProt/PubMed and note its known role in
+leukaemia for the Discussion section of the report.
+
+# 7. Session information
+
+```{r session}
+sessionInfo()
+```
