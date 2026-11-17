@@ -60,12 +60,12 @@ table(class)
 ```
 
 ```{r split}
-# Original split: first 38 samples are the training set, remaining 34 the test set
-n_train   <- ncol(exprs(Golub_Train))
-train_idx <- seq_len(n_train)
+# Match samples to the original Golub training set by sample name
+train_names <- sampleNames(Golub_Train)
+train_idx <- which(colnames(expr) %in% train_names)
 test_idx  <- setdiff(seq_len(ncol(expr)), train_idx)
 
-# Sanity check against the published split (27 ALL/11 AML train; 20 ALL/14 AML test)
+length(train_idx)
 print(table(class[train_idx])); print(table(class[test_idx]))
 ```
 
