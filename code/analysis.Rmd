@@ -45,6 +45,8 @@ training/independent test split from the paper. Golub_Merge holds all 72.
 
 ```{r import}
 data(Golub_Merge)
+data(Golub_Train)
+data(Golub_Test)
 eset  <- Golub_Merge
 expr  <- exprs(eset)        # genes x samples (Affymetrix intensities)
 pheno <- pData(eset)
